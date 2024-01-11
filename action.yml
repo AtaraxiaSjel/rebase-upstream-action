@@ -1,6 +1,6 @@
 name: Rebase Upstream
 description: Use git rebase to sync with upstream
-author: imba-tjd
+author: AtaraxiaSjel
 branding:
   icon: git-pull-request
   color: green
@@ -22,12 +22,18 @@ inputs:
     required: false
     default:  true
 
+outputs:
+  has_new_commits:
+    description: True when new commits were included in this rebase
+    value: ${{ steps.check.outputs.has_new_commits }}
+
 runs:
   using: composite
   steps:
     - run: |
         set -ex;
 
+        OLD_COMMIT_HASH=$(git rev-parse HEAD);
         UPSTREAM=${{ inputs.upstream }};
         if [ -z $UPSTREAM ]; then
             echo ${{ github.token }} | gh auth login --with-token;
@@ -49,6 +55,15 @@ runs:
         git config --local user.name  "GitHub Actions";
 
         git rebase upstream/${{ inputs.branch }};
+
+        NEW_COMMIT_HASH=$(git rev-parse HEAD);
+        if [ "${LOCAL_COMMIT_HASH}" = "${UPSTREAM_COMMIT_HASH}" ]; then
+            echo "has_new_commits=false" >> $GITHUB_OUTPUT
+            echo 'There are no new commits in upstream' 1>&1;
+        else
+            echo "has_new_commits=true" >> $GITHUB_OUTPUT
+            echo 'There are new commits that was been merged' 1>&1;
+        fi
 
         if [ "${{ inputs.push }}" = "true" -a "$(git status | grep diverged)" ]; then
             git push origin $(git branch --show-current) --force-with-lease;
