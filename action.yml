@@ -12,15 +12,15 @@ inputs:
   branch:
     description: The upstream branch that is rebased on
     required: false
-    default:  master
+    default: master
   depth:
-    description: Greater than the number of commits the upstream made in a period
+    description: Greater than the number of commits the upstream made in a period. Set to "0" to disable.
     required: false
-    default:  100
+    default: "100"
   push:
     description: Do the force push in this action
     required: false
-    default:  true
+    default: "true"
   token:
     description: GitHub token to access to API and git
     required: false
@@ -34,43 +34,62 @@ outputs:
 runs:
   using: composite
   steps:
-    - run: |
-        set -ex;
+    - id: check
+      shell: bash
+      env:
+        INPUT_UPSTREAM: ${{ inputs.upstream }}
+        INPUT_BRANCH: ${{ inputs.branch }}
+        INPUT_DEPTH: ${{ inputs.depth }}
+        INPUT_PUSH: ${{ inputs.push }}
+        GITHUB_TOKEN: ${{ inputs.token }}
+      run: |
+        set -e
 
-        OLD_COMMIT_HASH=$(git rev-parse HEAD);
-        UPSTREAM=${{ inputs.upstream }};
-        GITHUB_TOKEN=${{ inputs.token }};
-        if [ -z $UPSTREAM ]; then
-            echo $GITHUB_TOKEN | gh auth login --with-token;
-            UPSTREAM=$(gh api repos/:owner/:repo --jq .parent.full_name);
-            if [ -z $UPSTREAM ]; then echo "Can't find upstream" >&2 && exit 1; fi;
-        fi;
-        if [ ! $(echo $UPSTREAM | egrep '^(http|git@)') ]; then
-            UPSTREAM=https://github.com/$UPSTREAM.git
-        fi;
-        if [ ${{ inputs.depth }} -ne 0 ]; then
-            DEPTH=--depth=${{ inputs.depth }}
-        fi;
+        OLD_COMMIT_HASH=$(git rev-parse HEAD)
+        UPSTREAM="$INPUT_UPSTREAM"
 
-        git remote add upstream $UPSTREAM;
-
-        git fetch upstream ${{ inputs.branch }} $DEPTH;
-
-        git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com";
-        git config --local user.name  "GitHub Actions";
-
-        git rebase upstream/${{ inputs.branch }};
-
-        NEW_COMMIT_HASH=$(git rev-parse HEAD);
-        if [ "$OLD_COMMIT_HASH" = "$NEW_COMMIT_HASH" ]; then
-            echo "has_new_commits=false" >> $GITHUB_OUTPUT
-            echo 'There are no new commits in upstream' 1>&1;
-        else
-            echo "has_new_commits=true" >> $GITHUB_OUTPUT
-            echo 'There are new commits that was been merged' 1>&1;
+        # Auto-detect parent repository if no upstream is explicitly provided
+        if [ -z "$UPSTREAM" ] || [ "$UPSTREAM" = "null" ]; then
+            UPSTREAM=$(gh api repos/:owner/:repo --jq '.parent.full_name')
+            if [ -z "$UPSTREAM" ] || [ "$UPSTREAM" = "null" ]; then
+                echo "Error: Can't find upstream repository. Ensure this is a fork or pass 'upstream' input explicitly." >&2
+                exit 1
+            fi
         fi
 
-        if [ "${{ inputs.push }}" = "true" -a "$(git status | grep diverged)" ]; then
-            git push origin $(git branch --show-current) --force-with-lease;
-        fi;
-      shell: bash
+        # Normalize shorthand 'owner/repo' string into a full HTTPS URL
+        if [[ ! "$UPSTREAM" =~ ^(http|git@) ]]; then
+            UPSTREAM="https://github.com/$UPSTREAM.git"
+        fi
+
+        # Pass depth argument only if it is a valid non-zero integer
+        DEPTH_ARG=""
+        if [[ "$INPUT_DEPTH" =~ ^[0-9]+$ ]] && [ "$INPUT_DEPTH" -ne 0 ]; then
+            DEPTH_ARG="--depth=$INPUT_DEPTH"
+        fi
+
+        # Idempotently add or update the upstream remote configuration
+        git remote add upstream "$UPSTREAM" 2>/dev/null || git remote set-url upstream "$UPSTREAM"
+
+        git fetch upstream "$INPUT_BRANCH" $DEPTH_ARG
+
+        # Set up a temporary Git user profile required for rebasing
+        git config --local user.email "github-actions[bot]@users.noreply.github.com"
+        git config --local user.name  "github-actions[bot]"
+
+        git rebase "upstream/$INPUT_BRANCH"
+
+        NEW_COMMIT_HASH=$(git rev-parse HEAD)
+        if [ "$OLD_COMMIT_HASH" = "$NEW_COMMIT_HASH" ]; then
+            echo "has_new_commits=false" >> "$GITHUB_OUTPUT"
+            echo "There are no new commits in upstream."
+        else
+            echo "has_new_commits=true" >> "$GITHUB_OUTPUT"
+            echo "There are new commits that have been integrated."
+
+            # Push with force-with-lease to safely update origin since history was rewritten
+            if [ "$INPUT_PUSH" = "true" ]; then
+                CURRENT_BRANCH=$(git branch --show-current)
+                git push origin "$CURRENT_BRANCH" --force-with-lease
+            fi
+        fi
